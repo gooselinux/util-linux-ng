@@ -1,0 +1,26 @@
+From 9683e327eda75bf7f47e9d058cea9ff9445d58e4 Mon Sep 17 00:00:00 2001
+From: Karel Zak <kzak@redhat.com>
+Date: Wed, 16 Jun 2010 23:40:46 +0200
+Subject: [PATCH] wipefs: fix mem usage
+
+Signed-off-by: Karel Zak <kzak@redhat.com>
+---
+ misc-utils/wipefs.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/misc-utils/wipefs.c b/misc-utils/wipefs.c
+index aa4b696..1db72fd 100644
+--- a/misc-utils/wipefs.c
++++ b/misc-utils/wipefs.c
+@@ -174,7 +174,7 @@ get_offset_from_probe(struct wipe_desc *wp, blkid_probe pr, int zap)
+ 		wp->usage = xstrdup(usage);
+ 		wp->type = xstrdup(type);
+ 
+-		wp->magic = xmalloc(wp->len);
++		wp->magic = xmalloc(len);
+ 		memcpy(wp->magic, mag, len);
+ 		wp->len = len;
+ 
+-- 
+1.6.6.1
+
