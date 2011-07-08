@@ -3,7 +3,7 @@
 Summary: A collection of basic system utilities
 Name: util-linux-ng
 Version: 2.17.2
-Release: 6%{?dist}
+Release: 7%{?dist}
 License: GPLv1+ and GPLv2 and GPLv2+ and LGPLv2+ and MIT and BSD with advertising and Public Domain
 Group: System Environment/Base
 URL: ftp://ftp.kernel.org/pub/linux/utils/util-linux-ng
@@ -763,6 +763,9 @@ fi
 
 
 %changelog
+* Fri Jul 08 2011 Mike Adams <shalkie@gooseproject.org> 2.17.2-7
+- Rebuild for GoOSe Linux 6
+
 * Fri Aug 13 2010 Karel Zak <kzak@redhat.com> 2.17.2-6
 - fix #592958 - whole disk raid members to not be identified
 
