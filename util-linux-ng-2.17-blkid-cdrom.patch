@@ -1,0 +1,104 @@
+
+based on upstream patch:
+
+	commit 55113b15afe5f61fc917c22a9d8d47f89b37c757
+	Author: M.S.Colclough <m.s.colclough@bham.ac.uk>
+	Date:   Wed Mar 31 18:11:00 2010 +0200
+
+	    libblkid: avoid probing CDs for RAID
+	    
+	    RAID probing of CD/DVD can yield errors because of well-known problem
+	    in reading the end of the disk with some disk/drive combinations.
+	    Borrow CD detection method from udev and skip the RAID tests for
+	    these devices.
+	    
+	    [kzak@redhat.com: - check for linux/cdrom.h in ./configure
+			      - add #ifdef around the ioctl call
+			      - call the ioctl for block devices only]
+	    
+	    Signed-off-by: Mark Colclough <m.s.colclough@bham.ac.uk>
+	    Signed-off-by: Karel Zak <kzak@redhat.com>
+
+
+---
+ shlibs/blkid/src/blkidP.h                  |    2 ++
+ shlibs/blkid/src/probe.c                   |   14 ++++++++++++++
+ shlibs/blkid/src/superblocks/superblocks.c |    5 +++++
+ 3 files changed, 21 insertions(+)
+
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/blkidP.h
++++ util-linux-ng-2.17.2/shlibs/blkid/src/blkidP.h
+@@ -210,6 +210,7 @@ struct blkid_struct_probe
+ /* flags */
+ #define BLKID_PRIVATE_FD	(1 << 1)	/* see blkid_new_probe_from_filename() */
+ #define BLKID_TINY_DEV		(1 << 2)	/* <= 1.47MiB (floppy or so) */
++#define BLKID_CDROM_DEV		(1 << 3)	/* is a CD/DVD drive */
+ 
+ /*
+  * Evaluation methods (for blkid_eval_* API)
+@@ -366,6 +367,7 @@ extern void blkid_free_dev(blkid_dev dev
+ 
+ /* probe.c */
+ extern int blkid_probe_is_tiny(blkid_probe pr);
++extern int blkid_probe_is_cdrom(blkid_probe pr);
+ extern unsigned char *blkid_probe_get_buffer(blkid_probe pr,
+                                 blkid_loff_t off, blkid_loff_t len);
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/probe.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/probe.c
+@@ -77,6 +77,7 @@
+ #include <fcntl.h>
+ #include <ctype.h>
+ #include <sys/types.h>
++#include <linux/cdrom.h>
+ #ifdef HAVE_SYS_STAT_H
+ #include <sys/stat.h>
+ #endif
+@@ -545,6 +546,14 @@ int blkid_probe_is_tiny(blkid_probe pr)
+ 	return pr && (pr->flags & BLKID_TINY_DEV);
+ }
+ 
++/*
++ * CDROMs may fail when probed for RAID (last sector problem)
++ */
++int blkid_probe_is_cdrom(blkid_probe pr)
++{
++	return pr && (pr->flags & BLKID_CDROM_DEV);
++}
++
+ /**
+  * blkid_probe_set_device:
+  * @pr: probe
+@@ -570,6 +579,7 @@ int blkid_probe_set_device(blkid_probe p
+ 
+ 	pr->flags &= ~BLKID_PRIVATE_FD;
+ 	pr->flags &= ~BLKID_TINY_DEV;
++	pr->flags &= ~BLKID_CDROM_DEV;
+ 	pr->fd = fd;
+ 	pr->off = off;
+ 	pr->size = 0;
+@@ -615,6 +625,10 @@ int blkid_probe_set_device(blkid_probe p
+ 	if (pr->size <= 1440 * 1024 && !S_ISCHR(pr->mode))
+ 		pr->flags |= BLKID_TINY_DEV;
+ 
++#ifdef CDROM_GET_CAPABILITY
++	if (S_ISBLK(pr->mode) && ioctl(fd, CDROM_GET_CAPABILITY, NULL) >= 0)
++		pr->flags |= BLKID_CDROM_DEV;
++#endif
+ 	return 0;
+ err:
+ 	DBG(DEBUG_LOWPROBE,
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/superblocks.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/superblocks.c
+@@ -342,6 +342,11 @@ static int superblocks_probe(blkid_probe
+ 		    blkid_probe_is_tiny(pr))
+ 			continue;
+ 
++		/* don't probe for RAIDs, swap or journal on floppies or CD/DVDs */
++		if ((id->usage & (BLKID_USAGE_RAID | BLKID_USAGE_OTHER)) &&
++		    (blkid_probe_is_tiny(pr) || blkid_probe_is_cdrom(pr)))
++			continue;
++
+ 		DBG(DEBUG_LOWPROBE, printf("[%d] %s:\n", i, id->name));
+ 
+ 		/* try to detect by magic string */

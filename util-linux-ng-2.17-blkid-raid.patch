@@ -1,0 +1,1515 @@
+---
+ misc-utils/blkid.c                            |   37 +++----
+ shlibs/blkid/src/blkidP.h                     |   11 +-
+ shlibs/blkid/src/partitions/partitions.c      |   92 ++++++++++++++++++
+ shlibs/blkid/src/probe.c                      |  102 ++++++++++++++++++--
+ shlibs/blkid/src/superblocks/adaptec_raid.c   |    7 +
+ shlibs/blkid/src/superblocks/ddf_raid.c       |   74 +++++++++++++-
+ shlibs/blkid/src/superblocks/drbd.c           |   13 +-
+ shlibs/blkid/src/superblocks/highpoint_raid.c |   14 ++
+ shlibs/blkid/src/superblocks/isw_raid.c       |    6 -
+ shlibs/blkid/src/superblocks/jmicron_raid.c   |    6 -
+ shlibs/blkid/src/superblocks/linux_raid.c     |  132 +++++++++++++++++++++-----
+ shlibs/blkid/src/superblocks/lsi_raid.c       |    6 -
+ shlibs/blkid/src/superblocks/nvidia_raid.c    |    7 -
+ shlibs/blkid/src/superblocks/promise_raid.c   |    9 +
+ shlibs/blkid/src/superblocks/silicon_raid.c   |    9 +
+ shlibs/blkid/src/superblocks/superblocks.c    |   68 +++++++++----
+ shlibs/blkid/src/superblocks/superblocks.h    |    2 
+ shlibs/blkid/src/superblocks/sysv.c           |   14 ++
+ shlibs/blkid/src/superblocks/ufs.c            |    8 +
+ shlibs/blkid/src/superblocks/via_raid.c       |    6 +
+ tests/expected/blkid/md-raid1-part            |   58 +++++++++++
+ tests/expected/blkid/md-raid1-whole           |   58 +++++++++++
+ tests/functions.sh                            |    2 
+ tests/ts/blkid/md-raid1-part                  |   92 ++++++++++++++++++
+ tests/ts/blkid/md-raid1-whole                 |   88 +++++++++++++++++
+ 25 files changed, 837 insertions(+), 84 deletions(-)
+
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/blkidP.h
++++ util-linux-ng-2.17.2/shlibs/blkid/src/blkidP.h
+@@ -193,10 +193,12 @@ struct blkid_struct_probe
+ 	blkid_loff_t		size;		/* end of data on the device */
+ 
+ 	dev_t			devno;		/* device number (st.st_rdev) */
++	dev_t			disk_devno;	/* devno of the whole-disk or 0 */
+ 	unsigned int		blkssz;		/* sector size (BLKSSZGET ioctl) */
+ 	mode_t			mode;		/* struct stat.sb_mode */
+ 
+ 	int			flags;		/* private libray flags */
++	int			prob_flags;	/* always zeroized by blkid_do_*() */
+ 
+ 	struct list_head	buffers;	/* list of buffers */
+ 
+@@ -207,10 +209,12 @@ struct blkid_struct_probe
+ 	int			nvals;		/* number of assigned vals */
+ };
+ 
+-/* flags */
++/* private flags */
+ #define BLKID_PRIVATE_FD	(1 << 1)	/* see blkid_new_probe_from_filename() */
+ #define BLKID_TINY_DEV		(1 << 2)	/* <= 1.47MiB (floppy or so) */
+ #define BLKID_CDROM_DEV		(1 << 3)	/* is a CD/DVD drive */
++/* private probing flags */
++#define BLKID_PARTS_IGNORE_PT	(1 << 1)	/* ignore partition table */
+ 
+ /*
+  * Evaluation methods (for blkid_eval_* API)
+@@ -366,6 +370,8 @@ extern blkid_dev blkid_new_dev(void);
+ extern void blkid_free_dev(blkid_dev dev);
+ 
+ /* probe.c */
++extern dev_t blkid_probe_get_wholedisk_devno(blkid_probe pr);
++extern int blkid_probe_is_wholedisk(blkid_probe pr);
+ extern int blkid_probe_is_tiny(blkid_probe pr);
+ extern int blkid_probe_is_cdrom(blkid_probe pr);
+ extern unsigned char *blkid_probe_get_buffer(blkid_probe pr,
+@@ -386,6 +392,9 @@ extern int blkid_probe_set_dimension(blk
+ 
+ extern blkid_partlist blkid_probe_get_partlist(blkid_probe pr);
+ 
++extern int blkid_probe_is_covered_by_pt(blkid_probe pr,
++					blkid_loff_t offset, blkid_loff_t size);
++
+ extern void blkid_probe_chain_reset_vals(blkid_probe pr, struct blkid_chain *chn);
+ extern int blkid_probe_chain_copy_vals(blkid_probe pr, struct blkid_chain *chn,
+ 			                struct blkid_prval *vals, int nvals);
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/probe.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/probe.c
+@@ -288,21 +288,33 @@ struct blkid_chain *blkid_probe_get_chai
+ 
+ void *blkid_probe_get_binary_data(blkid_probe pr, struct blkid_chain *chn)
+ {
+-	int rc;
++	int rc, org_prob_flags;
++	struct blkid_chain *org_chn;
+ 
+ 	if (!pr || !chn)
+ 		return NULL;
+ 
++	/* save the current setting -- the binary API has to be completely
++	 * independent on the current probing status
++	 */
++	org_chn = pr->cur_chain;
++	org_prob_flags = pr->prob_flags;
++
+ 	pr->cur_chain = chn;
++	pr->prob_flags = 0;
+ 	chn->binary = TRUE;
+ 	blkid_probe_chain_reset_position(chn);
+ 
+ 	rc = chn->driver->probe(pr, chn);
+ 
+ 	chn->binary = FALSE;
+-	pr->cur_chain = NULL;
+ 	blkid_probe_chain_reset_position(chn);
+ 
++	/* restore the original setting
++	 */
++	pr->cur_chain = org_chn;
++	pr->prob_flags = org_prob_flags;
++
+ 	if (rc != 0)
+ 		return NULL;
+ 
+@@ -629,6 +641,13 @@ int blkid_probe_set_device(blkid_probe p
+ 	if (S_ISBLK(pr->mode) && ioctl(fd, CDROM_GET_CAPABILITY, NULL) >= 0)
+ 		pr->flags |= BLKID_CDROM_DEV;
+ #endif
++
++	DBG(DEBUG_LOWPROBE, printf("ready for low-probing, offset=%jd, size=%jd\n",
++				pr->off, pr->size));
++	DBG(DEBUG_LOWPROBE, printf("whole-disk: %s, regfile: %s\n",
++		blkid_probe_is_wholedisk(pr) ?"YES" : "NO",
++		S_ISREG(pr->mode) ? "YES" : "NO"));
++
+ 	return 0;
+ err:
+ 	DBG(DEBUG_LOWPROBE,
+@@ -674,6 +693,22 @@ int blkid_probe_set_dimension(blkid_prob
+ 	return 0;
+ }
+ 
++static inline void blkid_probe_start(blkid_probe pr)
++{
++	if (pr) {
++		pr->cur_chain = NULL;
++		pr->prob_flags = 0;
++	}
++}
++
++static inline void blkid_probe_end(blkid_probe pr)
++{
++	if (pr) {
++		pr->cur_chain = NULL;
++		pr->prob_flags = 0;
++	}
++}
++
+ /**
+  * blkid_do_probe:
+  * @pr: prober
+@@ -725,9 +760,10 @@ int blkid_do_probe(blkid_probe pr)
+ 	do {
+ 		struct blkid_chain *chn = pr->cur_chain;
+ 
+-		if (!chn)
++		if (!chn) {
++			blkid_probe_start(pr);
+ 			chn = pr->cur_chain = &pr->chains[0];
+-
++		}
+ 		/* we go to the next chain only when the previous probing
+ 		 * result was nothing (rc == 1) and when the current chain is
+ 		 * disabled or we are at end of the current chain (chain->idx +
+@@ -742,8 +778,10 @@ int blkid_do_probe(blkid_probe pr)
+ 
+ 			if (idx < BLKID_NCHAINS)
+ 				chn = pr->cur_chain = &pr->chains[idx];
+-			else
++			else {
++				blkid_probe_end(pr);
+ 				return 1;	/* all chains already probed */
++			}
+ 		}
+ 
+ 		chn->binary = FALSE;		/* for sure... */
+@@ -775,7 +813,9 @@ int blkid_do_probe(blkid_probe pr)
+  *
+  * Note about suberblocks chain -- the function does not check for filesystems
+  * when a RAID signature is detected.  The function also does not check for
+- * collision between RAIDs. The first detected RAID is returned.
++ * collision between RAIDs. The first detected RAID is returned. The function
++ * checks for collision between partition table and RAID signature -- it's
++ * recommended to enable partitions chain together with superblocks chain.
+  *
+  * Returns: 0 on success, 1 if nothing is detected, -2 if ambivalen result is
+  * detected and -1 on case of error.
+@@ -787,6 +827,8 @@ int blkid_do_safeprobe(blkid_probe pr)
+ 	if (!pr)
+ 		return -1;
+ 
++	blkid_probe_start(pr);
++
+ 	for (i = 0; i < BLKID_NCHAINS; i++) {
+ 		struct blkid_chain *chn;
+ 
+@@ -814,7 +856,7 @@ int blkid_do_safeprobe(blkid_probe pr)
+ 	}
+ 
+ done:
+-	pr->cur_chain = NULL;
++	blkid_probe_end(pr);
+ 	if (rc < 0)
+ 		return rc;
+ 	return count ? 0 : 1;
+@@ -839,6 +881,8 @@ int blkid_do_fullprobe(blkid_probe pr)
+ 	if (!pr)
+ 		return -1;
+ 
++	blkid_probe_start(pr);
++
+ 	for (i = 0; i < BLKID_NCHAINS; i++) {
+ 		int rc;
+ 		struct blkid_chain *chn;
+@@ -867,7 +911,7 @@ int blkid_do_fullprobe(blkid_probe pr)
+ 	}
+ 
+ done:
+-	pr->cur_chain = NULL;
++	blkid_probe_end(pr);
+ 	if (rc < 0)
+ 		return rc;
+ 	return count ? 0 : 1;
+@@ -988,6 +1032,48 @@ dev_t blkid_probe_get_devno(blkid_probe 
+ }
+ 
+ /**
++ * blkid_probe_get_wholedisk_devno:
++ * @pr: probe
++ *
++ * Returns: device number of the wholedisk, or 0 for regilar files.
++ */
++dev_t blkid_probe_get_wholedisk_devno(blkid_probe pr)
++{
++	if (!pr->disk_devno) {
++		dev_t devno, disk_devno = 0;
++
++		devno = blkid_probe_get_devno(pr);
++		if (!devno)
++			return 0;
++
++		 if (blkid_devno_to_wholedisk(devno, NULL, 0, &disk_devno) == 0)
++			pr->disk_devno = disk_devno;
++	}
++	return pr->disk_devno;
++}
++
++/**
++ * blkid_probe_is_wholedisk:
++ * @pr: probe
++ *
++ * Returns: 1 if the device is whole-disk or 0.
++ */
++int blkid_probe_is_wholedisk(blkid_probe pr)
++{
++	dev_t devno, disk_devno;
++
++	devno = blkid_probe_get_devno(pr);
++	if (!devno)
++		return 0;
++
++	disk_devno = blkid_probe_get_wholedisk_devno(pr);
++	if (!disk_devno)
++		return 0;
++
++	return devno == disk_devno;
++}
++
++/**
+  * blkid_probe_get_size:
+  * @pr: probe
+  *
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/superblocks.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/superblocks.c
+@@ -375,8 +375,10 @@ static int superblocks_probe(blkid_probe
+ 		/* final check by probing function */
+ 		if (id->probefunc) {
+ 			DBG(DEBUG_LOWPROBE, printf("\tcall probefunc()\n"));
+-			if (id->probefunc(pr, mag) != 0)
++			if (id->probefunc(pr, mag) != 0) {
++				blkid_probe_chain_reset_vals(pr, chn);
+ 				continue;
++			}
+ 		}
+ 
+ 		/* all cheks passed */
+@@ -385,15 +387,11 @@ static int superblocks_probe(blkid_probe
+ 				(unsigned char *) id->name,
+ 				strlen(id->name) + 1);
+ 
+-		if (chn->flags & BLKID_SUBLKS_USAGE)
+-			blkid_probe_set_usage(pr, id->usage);
++		blkid_probe_set_usage(pr, id->usage);
+ 
+-		if (hasmag && (chn->flags & BLKID_SUBLKS_MAGIC)) {
+-			blkid_probe_set_value(pr, "SBMAGIC",
+-				(unsigned char *) mag->magic, mag->len);
+-			blkid_probe_sprintf_value(pr, "SBMAGIC_OFFSET",
+-				"%llu",	off);
+-		}
++		if (hasmag)
++			blkid_probe_set_magic(pr, off, mag->len,
++					(unsigned char *) mag->magic);
+ 
+ 		DBG(DEBUG_LOWPROBE,
+ 			printf("<-- leaving probing loop (type=%s) [SUBLKS idx=%d]\n",
+@@ -435,20 +433,24 @@ static int superblocks_safeprobe(blkid_p
+ 			/* floppy or so -- returns the first result. */
+ 			return 0;
+ 
+-		if (!count) {
+-			/* save the first result */
+-			nvals = blkid_probe_chain_copy_vals(pr, chn, vals, nvals);
+-			idx = chn->idx;
+-		}
+ 		count++;
+ 
+ 		if (idinfos[chn->idx]->usage & (BLKID_USAGE_RAID | BLKID_USAGE_CRYPTO))
+ 			break;
++
+ 		if (!(idinfos[chn->idx]->flags & BLKID_IDINFO_TOLERANT))
+ 			intol++;
++
++		if (count == 1) {
++			/* save the first result */
++			nvals = blkid_probe_chain_copy_vals(pr, chn, vals, nvals);
++			idx = chn->idx;
++		}
+ 	}
++
+ 	if (rc < 0)
+ 		return rc;		/* error */
++
+ 	if (count > 1 && intol) {
+ 		DBG(DEBUG_LOWPROBE,
+ 			printf("ERROR: superblocks chain: "
+@@ -459,14 +461,40 @@ static int superblocks_safeprobe(blkid_p
+ 	if (!count)
+ 		return 1;		/* nothing detected */
+ 
+-	/* restore the first result */
+-	blkid_probe_chain_reset_vals(pr, chn);
+-	blkid_probe_append_vals(pr, vals, nvals);
+-	chn->idx = idx;
++	if (idx != -1) {
++		/* restore the first result */
++		blkid_probe_chain_reset_vals(pr, chn);
++		blkid_probe_append_vals(pr, vals, nvals);
++		chn->idx = idx;
++	}
++
++	/*
++	 * The RAID device could be partitioned. The problem are RAID1 devices
++	 * where the partition table is visible from underlaying devices. We
++	 * have to ignore such partition tables.
++	 */
++	if (chn->idx >= 0 && idinfos[chn->idx]->usage & BLKID_USAGE_RAID)
++		pr->prob_flags |= BLKID_PARTS_IGNORE_PT;
+ 
+ 	return 0;
+ }
+ 
++int blkid_probe_set_magic(blkid_probe pr, blkid_loff_t offset,
++			size_t len, unsigned char *magic)
++{
++	int rc = 0;
++	struct blkid_chain *chn = blkid_probe_get_chain(pr);
++
++	if (chn->flags & BLKID_SUBLKS_MAGIC) {
++		if (magic && len)
++			rc = blkid_probe_set_value(pr, "SBMAGIC", magic, len);
++		if (!rc && offset)
++			rc = blkid_probe_sprintf_value(pr, "SBMAGIC_OFFSET",
++					"%llu",	offset);
++	}
++	return rc;
++}
++
+ int blkid_probe_set_version(blkid_probe pr, const char *version)
+ {
+ 	struct blkid_chain *chn = blkid_probe_get_chain(pr);
+@@ -494,8 +522,12 @@ int blkid_probe_sprintf_version(blkid_pr
+ 
+ static int blkid_probe_set_usage(blkid_probe pr, int usage)
+ {
++	struct blkid_chain *chn = blkid_probe_get_chain(pr);
+ 	char *u = NULL;
+ 
++	if (!(chn->flags & BLKID_SUBLKS_USAGE))
++		return 0;
++
+ 	if (usage & BLKID_USAGE_FILESYSTEM)
+ 		u = "filesystem";
+ 	else if (usage & BLKID_USAGE_RAID)
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/superblocks.h
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/superblocks.h
+@@ -68,6 +68,8 @@ extern const struct blkid_idinfo drbd_id
+ /*
+  * superblock functions
+  */
++extern int blkid_probe_set_magic(blkid_probe pr, blkid_loff_t offset,
++		size_t len, unsigned char *magic);
+ extern int blkid_probe_set_version(blkid_probe pr, const char *version);
+ extern int blkid_probe_sprintf_version(blkid_probe pr, const char *fmt, ...)
+ 		__attribute__ ((format (printf, 2, 3)));
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/adaptec_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/adaptec_raid.c
+@@ -81,6 +81,9 @@ static int probe_adraid(blkid_probe pr, 
+ 	if (pr->size < 0x10000)
+ 		return -1;
+ 
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
++
+ 	off = ((pr->size / 0x200)-1) * 0x200;
+ 	ad = (struct adaptec_metadata *)
+ 			blkid_probe_get_buffer(pr,
+@@ -94,7 +97,9 @@ static int probe_adraid(blkid_probe pr, 
+ 		return -1;
+ 	if (blkid_probe_sprintf_version(pr, "%u", ad->resver) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr, off, sizeof(ad->b0idcode),
++				(unsigned char *) &ad->b0idcode))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/ddf_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/ddf_raid.c
+@@ -18,12 +18,57 @@
+ /* http://www.snia.org/standards/home */
+ #define DDF_GUID_LENGTH			24
+ #define DDF_REV_LENGTH			8
++#define DDF_MAGIC			0xDE11DE11
++
+ 
+ struct ddf_header {
+-	uint8_t		signature[4];
++	uint32_t	signature;
+ 	uint32_t	crc;
+ 	uint8_t		guid[DDF_GUID_LENGTH];
+-	uint8_t		ddf_rev[DDF_REV_LENGTH];
++	char		ddf_rev[8];	/* 01.02.00 */
++	uint32_t	seq;		/* starts at '1' */
++	uint32_t	timestamp;
++	uint8_t		openflag;
++	uint8_t		foreignflag;
++	uint8_t		enforcegroups;
++	uint8_t		pad0;		/* 0xff */
++	uint8_t		pad1[12];	/* 12 * 0xff */
++	/* 64 bytes so far */
++	uint8_t		header_ext[32];	/* reserved: fill with 0xff */
++	uint64_t	primary_lba;
++	uint64_t	secondary_lba;
++	uint8_t		type;
++	uint8_t		pad2[3];	/* 0xff */
++	uint32_t	workspace_len;	/* sectors for vendor space -
++					 * at least 32768(sectors) */
++	uint64_t	workspace_lba;
++	uint16_t	max_pd_entries;	/* one of 15, 63, 255, 1023, 4095 */
++	uint16_t	max_vd_entries; /* 2^(4,6,8,10,12)-1 : i.e. as above */
++	uint16_t	max_partitions; /* i.e. max num of configuration
++					   record entries per disk */
++	uint16_t	config_record_len; /* 1 +ROUNDUP(max_primary_element_entries
++				           *12/512) */
++	uint16_t	max_primary_element_entries; /* 16, 64, 256, 1024, or 4096 */
++	uint8_t		pad3[54];	/* 0xff */
++	/* 192 bytes so far */
++	uint32_t	controller_section_offset;
++	uint32_t	controller_section_length;
++	uint32_t	phys_section_offset;
++	uint32_t	phys_section_length;
++	uint32_t	virt_section_offset;
++	uint32_t	virt_section_length;
++	uint32_t	config_section_offset;
++	uint32_t	config_section_length;
++	uint32_t	data_section_offset;
++	uint32_t	data_section_length;
++	uint32_t	bbm_section_offset;
++	uint32_t	bbm_section_length;
++	uint32_t	diag_space_offset;
++	uint32_t	diag_space_length;
++	uint32_t	vendor_offset;
++	uint32_t	vendor_length;
++	/* 256 bytes so far */
++	uint8_t		pad4[256];	/* 0xff */
+ } __attribute__((packed));
+ 
+ static int probe_ddf(blkid_probe pr, const struct blkid_idmag *mag)
+@@ -32,12 +77,13 @@ static int probe_ddf(blkid_probe pr, con
+ 	int i;
+ 	struct ddf_header *ddf = NULL;
+ 	char version[DDF_REV_LENGTH + 1];
++	uint64_t off, lba;
+ 
+ 	if (pr->size < 0x30000)
+ 		return -1;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(hdrs); i++) {
+-		uint64_t off = ((pr->size / 0x200) - hdrs[i]) * 0x200;
++		off = ((pr->size / 0x200) - hdrs[i]) * 0x200;
+ 
+ 		ddf = (struct ddf_header *) blkid_probe_get_buffer(pr,
+ 					off,
+@@ -45,8 +91,8 @@ static int probe_ddf(blkid_probe pr, con
+ 		if (!ddf)
+ 			return -1;
+ 
+-		if (memcmp(ddf->signature, "\x11\xde\x11\xde", 4) == 0 ||
+-	            memcmp(ddf->signature, "\xde\x11\xde\x11", 4) == 0)
++		if (ddf->signature == cpu_to_be32(DDF_MAGIC) ||
++		    ddf->signature == cpu_to_le32(DDF_MAGIC))
+ 			break;
+ 		ddf = NULL;
+ 	}
+@@ -54,6 +100,20 @@ static int probe_ddf(blkid_probe pr, con
+ 	if (!ddf)
+ 		return -1;
+ 
++	lba = ddf->signature == cpu_to_be32(DDF_MAGIC) ?
++			be64_to_cpu(ddf->primary_lba) :
++			le64_to_cpu(ddf->primary_lba);
++
++	if (lba > 0) {
++		/* check primary header */
++		unsigned char *buf;
++
++		buf = blkid_probe_get_buffer(pr,
++					lba << 9, sizeof(ddf->signature));
++		if (!buf || memcmp(buf, &ddf->signature, 4))
++			return -1;
++	}
++
+ 	blkid_probe_strncpy_uuid(pr, ddf->guid, sizeof(ddf->guid));
+ 
+ 	memcpy(version, ddf->ddf_rev, sizeof(ddf->ddf_rev));
+@@ -61,6 +121,10 @@ static int probe_ddf(blkid_probe pr, con
+ 
+ 	if (blkid_probe_set_version(pr, version) != 0)
+ 		return -1;
++	if (blkid_probe_set_magic(pr, off,
++			sizeof(ddf->signature),
++			(unsigned char *) &ddf->signature))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/drbd.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/drbd.c
+@@ -14,6 +14,7 @@
+ #include <errno.h>
+ #include <ctype.h>
+ #include <inttypes.h>
++#include <stddef.h>
+ 
+ #include "superblocks.h"
+ 
+@@ -75,9 +76,9 @@ static int probe_drbd(blkid_probe pr, co
+ 		return -1;
+ 
+ 	md = (struct md_on_disk_08 *)
+-		blkid_probe_get_buffer(pr,
+-		off,
+-		sizeof(struct md_on_disk_08));
++			blkid_probe_get_buffer(pr,
++					off,
++					sizeof(struct md_on_disk_08));
+ 	if (!md)
+ 		return -1;
+ 
+@@ -94,6 +95,12 @@ static int probe_drbd(blkid_probe pr, co
+ 
+ 	blkid_probe_set_version(pr, "v08");
+ 
++	if (blkid_probe_set_magic(pr,
++				off + offsetof(struct md_on_disk_08, magic),
++				sizeof(md->magic),
++				(unsigned char *) &md->magic))
++		return -1;
++
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/highpoint_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/highpoint_raid.c
+@@ -30,6 +30,8 @@ static int probe_highpoint45x(blkid_prob
+ 
+ 	if (pr->size < 0x10000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	off = ((pr->size / 0x200) - 11) * 0x200;
+ 	hpt = (struct hpt45x_metadata *)
+@@ -41,9 +43,20 @@ static int probe_highpoint45x(blkid_prob
+ 	magic = le32_to_cpu(hpt->magic);
+ 	if (magic != HPT45X_MAGIC_OK && magic != HPT45X_MAGIC_BAD)
+ 		return -1;
++	if (blkid_probe_set_magic(pr, off, sizeof(hpt->magic),
++				(unsigned char *) &hpt->magic))
++		return -1;
+ 	return 0;
+ }
+ 
++static int probe_highpoint37x(blkid_probe pr, const struct blkid_idmag *mag)
++{
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
++	return 0;
++}
++
++
+ const struct blkid_idinfo highpoint45x_idinfo = {
+ 	.name		= "hpt45x_raid_member",
+ 	.usage		= BLKID_USAGE_RAID,
+@@ -54,6 +67,7 @@ const struct blkid_idinfo highpoint45x_i
+ const struct blkid_idinfo highpoint37x_idinfo = {
+ 	.name		= "hpt37x_raid_member",
+ 	.usage		= BLKID_USAGE_RAID,
++	.probefunc	= probe_highpoint37x,
+ 	.magics		= {
+ 		/*
+ 		 * Superblok offset:                      4608 bytes  (9 sectors)
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/isw_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/isw_raid.c
+@@ -33,6 +33,8 @@ static int probe_iswraid(blkid_probe pr,
+ 
+ 	if (pr->size < 0x10000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	off = ((pr->size / 0x200) - 2) * 0x200;
+ 	isw = (struct isw_metadata *)
+@@ -46,7 +48,9 @@ static int probe_iswraid(blkid_probe pr,
+ 	if (blkid_probe_sprintf_version(pr, "%6s",
+ 			&isw->sig[sizeof(ISW_SIGNATURE)-1]) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr, off, sizeof(isw->sig),
++				(unsigned char *) isw->sig))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/jmicron_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/jmicron_raid.c
+@@ -32,6 +32,8 @@ static int probe_jmraid(blkid_probe pr, 
+ 
+ 	if (pr->size < 0x10000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	off = ((pr->size / 0x200) - 1) * 0x200;
+ 	jm = (struct jm_metadata *)
+@@ -45,7 +47,9 @@ static int probe_jmraid(blkid_probe pr, 
+ 	if (blkid_probe_sprintf_version(pr, "%u.%u",
+ 				jm->major_version, jm->minor_version) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr, off, sizeof(jm->signature),
++				(unsigned char *) jm->signature))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/linux_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/linux_raid.c
+@@ -34,27 +34,82 @@ struct mdp0_super_block {
+ 	uint32_t	set_uuid3;
+ };
+ 
++/*
++ * Version-1, little-endian.
++ */
+ struct mdp1_super_block {
+-	uint32_t	magic;
+-	uint32_t	major_version;
+-	uint32_t	feature_map;
+-	uint32_t	pad0;
+-	uint8_t		set_uuid[16];
+-	uint8_t		set_name[32];
++	/* constant array information - 128 bytes */
++	uint32_t	magic;		/* MD_SB_MAGIC: 0xa92b4efc - little endian */
++	uint32_t	major_version;	/* 1 */
++	uint32_t	feature_map;	/* 0 for now */
++	uint32_t	pad0;		/* always set to 0 when writing */
++
++	uint8_t		set_uuid[16];	/* user-space generated. */
++	unsigned char	set_name[32];	/* set and interpreted by user-space */
++
++	uint64_t	ctime;		/* lo 40 bits are seconds, top 24 are microseconds or 0*/
++	uint32_t	level;		/* -4 (multipath), -1 (linear), 0,1,4,5 */
++	uint32_t	layout;		/* only for raid5 currently */
++	uint64_t	size;		/* used size of component devices, in 512byte sectors */
++
++	uint32_t	chunksize;	/* in 512byte sectors */
++	uint32_t	raid_disks;
++	uint32_t	bitmap_offset;	/* sectors after start of superblock that bitmap starts
++					 * NOTE: signed, so bitmap can be before superblock
++					 * only meaningful of feature_map[0] is set.
++					 */
++
++	/* These are only valid with feature bit '4' */
++	uint32_t	new_level;	/* new level we are reshaping to		*/
++	uint64_t	reshape_position;	/* next address in array-space for reshape */
++	uint32_t	delta_disks;	/* change in number of raid_disks		*/
++	uint32_t	new_layout;	/* new layout					*/
++	uint32_t	new_chunk;	/* new chunk size (bytes)			*/
++	uint8_t		pad1[128-124];	/* set to 0 when written */
++
++	/* constant this-device information - 64 bytes */
++	uint64_t	data_offset;	/* sector start of data, often 0 */
++	uint64_t	data_size;	/* sectors in this device that can be used for data */
++	uint64_t	super_offset;	/* sector start of this superblock */
++	uint64_t	recovery_offset;/* sectors before this offset (from data_offset) have been recovered */
++	uint32_t	dev_number;	/* permanent identifier of this  device - not role in raid */
++	uint32_t	cnt_corrected_read; /* number of read errors that were corrected by re-writing */
++	uint8_t		device_uuid[16]; /* user-space setable, ignored by kernel */
++        uint8_t		devflags;        /* per-device flags.  Only one defined...*/
++	uint8_t		pad2[64-57];	/* set to 0 when writing */
++
++	/* array state information - 64 bytes */
++	uint64_t	utime;		/* 40 bits second, 24 btes microseconds */
++	uint64_t	events;		/* incremented when superblock updated */
++	uint64_t	resync_offset;	/* data before this offset (from data_offset) known to be in sync */
++	uint32_t	sb_csum;	/* checksum upto dev_roles[max_dev] */
++	uint32_t	max_dev;	/* size of dev_roles[] array to consider */
++	uint8_t		pad3[64-32];	/* set to 0 when writing */
++
++	/* device state information. Indexed by dev_number.
++	 * 2 bytes per device
++	 * Note there are no per-device state flags. State information is rolled
++	 * into the 'roles' value.  If a device is spare or faulty, then it doesn't
++	 * have a meaningful role.
++	 */
++	uint16_t	dev_roles[0];	/* role in array, or 0xffff for a spare, or 0xfffe for faulty */
+ };
+ 
++
+ #define MD_RESERVED_BYTES		0x10000
+ #define MD_SB_MAGIC			0xa92b4efc
+ 
+-static int probe_raid0(blkid_probe pr, off_t off)
++static int probe_raid0(blkid_probe pr, blkid_loff_t off)
+ {
+ 	struct mdp0_super_block *mdp0;
+ 	union {
+ 		uint32_t ints[4];
+ 		uint8_t bytes[16];
+ 	} uuid;
++	uint32_t ma, mi, pa;
++	uint64_t size;
+ 
+-	if (pr->size < 0x10000)
++	if (pr->size < MD_RESERVED_BYTES)
+ 		return -1;
+ 	mdp0 = (struct mdp0_super_block *)
+ 			blkid_probe_get_buffer(pr,
+@@ -72,11 +127,10 @@ static int probe_raid0(blkid_probe pr, o
+ 			uuid.ints[2] = swab32(mdp0->set_uuid2);
+ 			uuid.ints[3] = swab32(mdp0->set_uuid3);
+ 		}
+-		if (blkid_probe_sprintf_version(pr, "%u.%u.%u",
+-				le32_to_cpu(mdp0->major_version),
+-				le32_to_cpu(mdp0->minor_version),
+-				le32_to_cpu(mdp0->patch_version)) != 0)
+-			return -1;
++		ma = le32_to_cpu(mdp0->major_version);
++		mi = le32_to_cpu(mdp0->minor_version);
++		pa = le32_to_cpu(mdp0->patch_version);
++		size = le32_to_cpu(mdp0->size);
+ 
+ 	} else if (be32_to_cpu(mdp0->md_magic) == MD_SB_MAGIC) {
+ 		uuid.ints[0] = mdp0->set_uuid0;
+@@ -85,17 +139,46 @@ static int probe_raid0(blkid_probe pr, o
+ 			uuid.ints[2] = mdp0->set_uuid2;
+ 			uuid.ints[3] = mdp0->set_uuid3;
+ 		}
+-		if (blkid_probe_sprintf_version(pr, "%u.%u.%u",
+-				be32_to_cpu(mdp0->major_version),
+-				be32_to_cpu(mdp0->minor_version),
+-				be32_to_cpu(mdp0->patch_version)) != 0)
+-			return -1;
++		ma = be32_to_cpu(mdp0->major_version);
++		mi = be32_to_cpu(mdp0->minor_version);
++		pa = be32_to_cpu(mdp0->patch_version);
++		size = be32_to_cpu(mdp0->size);
+ 	} else
+-		return -1;
++		return 1;
++
++	size <<= 10;	/* convert KiB to bytes */
+ 
++	if (pr->size < size + MD_RESERVED_BYTES)
++		/* device is too small */
++		return 1;
++
++	if (off < size)
++		/* no space before superblock */
++		return 1;
++
++	/*
++	 * Check for collisions between RAID and partition table
++	 *
++	 * For example the superblock is at the end of the last partition, it's
++	 * the same possition as at the end of the disk...
++	 */
++	if ((S_ISREG(pr->mode) || blkid_probe_is_wholedisk(pr)) &&
++	    blkid_probe_is_covered_by_pt(pr,
++			off - size,				/* min. start  */
++			size + MD_RESERVED_BYTES)) {		/* min. length */
++
++		/* ignore this superblock, it's within any partition and
++		 * we are working with whole-disk now */
++		return 1;
++	}
++
++	if (blkid_probe_sprintf_version(pr, "%u.%u.%u", ma, mi, pa) != 0)
++		return -1;
+ 	if (blkid_probe_set_uuid(pr, (unsigned char *) uuid.bytes) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr, off, sizeof(mdp0->md_magic),
++				(unsigned char *) &mdp0->md_magic))
++		return -1;
+ 	return 0;
+ }
+ 
+@@ -113,12 +196,19 @@ static int probe_raid1(blkid_probe pr, o
+ 		return -1;
+ 	if (le32_to_cpu(mdp1->major_version) != 1)
+ 		return -1;
++	if (le64_to_cpu(mdp1->super_offset) != off >> 9)
++		return -1;
+ 	if (blkid_probe_set_uuid(pr, (unsigned char *) mdp1->set_uuid) != 0)
+ 		return -1;
++	if (blkid_probe_set_uuid_as(pr,
++			(unsigned char *) mdp1->device_uuid, "UUID_SUB") != 0)
++		return -1;
+ 	if (blkid_probe_set_label(pr, mdp1->set_name,
+ 				sizeof(mdp1->set_name)) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr, off, sizeof(mdp1->magic),
++				(unsigned char *) &mdp1->magic))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/lsi_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/lsi_raid.c
+@@ -30,6 +30,8 @@ static int probe_lsiraid(blkid_probe pr,
+ 
+ 	if (pr->size < 0x10000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	off = ((pr->size / 0x200) - 1) * 0x200;
+ 	lsi = (struct lsi_metadata *)
+@@ -41,7 +43,9 @@ static int probe_lsiraid(blkid_probe pr,
+ 
+ 	if (memcmp(lsi->sig, LSI_SIGNATURE, sizeof(LSI_SIGNATURE)-1) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr, off, sizeof(lsi->sig),
++				(unsigned char *) lsi->sig))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/nvidia_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/nvidia_raid.c
+@@ -32,6 +32,8 @@ static int probe_nvraid(blkid_probe pr, 
+ 
+ 	if (pr->size < 0x10000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	off = ((pr->size / 0x200) - 2) * 0x200;
+ 	nv = (struct nv_metadata *)
+@@ -43,10 +45,11 @@ static int probe_nvraid(blkid_probe pr, 
+ 
+ 	if (memcmp(nv->vendor, NVIDIA_SIGNATURE, sizeof(NVIDIA_SIGNATURE)-1) != 0)
+ 		return -1;
+-
+ 	if (blkid_probe_sprintf_version(pr, "%u", le16_to_cpu(nv->version)) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr, off, sizeof(nv->vendor),
++				(unsigned char *) nv->vendor))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/promise_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/promise_raid.c
+@@ -33,6 +33,8 @@ static int probe_pdcraid(blkid_probe pr,
+ 
+ 	if (pr->size < 0x40000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	for (i = 0; sectors[i] != 0; i++) {
+ 		uint64_t off;
+@@ -47,8 +49,13 @@ static int probe_pdcraid(blkid_probe pr,
+ 			return -1;
+ 
+ 		if (memcmp(pdc->sig, PDC_SIGNATURE,
+-				sizeof(PDC_SIGNATURE) - 1) == 0)
++				sizeof(PDC_SIGNATURE) - 1) == 0) {
++
++			if (blkid_probe_set_magic(pr, off, sizeof(pdc->sig),
++						(unsigned char *) pdc->sig))
++				return -1;
+ 			return 0;
++		}
+ 	}
+ 	return -1;
+ }
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/silicon_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/silicon_raid.c
+@@ -15,6 +15,7 @@
+ #include <errno.h>
+ #include <ctype.h>
+ #include <stdint.h>
++#include <stddef.h>
+ 
+ #include "superblocks.h"
+ 
+@@ -47,6 +48,8 @@ static int probe_silraid(blkid_probe pr,
+ 
+ 	if (pr->size < 0x10000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	off = ((pr->size / 0x200) - 1) * 0x200;
+ 
+@@ -63,7 +66,11 @@ static int probe_silraid(blkid_probe pr,
+ 				le16_to_cpu(sil->major_ver),
+ 				le16_to_cpu(sil->minor_ver)) != 0)
+ 		return -1;
+-
++	if (blkid_probe_set_magic(pr,
++			off + offsetof(struct silicon_metadata, magic),
++			sizeof(sil->magic),
++			(unsigned char *) &sil->magic))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/sysv.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/sysv.c
+@@ -12,6 +12,7 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <stdint.h>
++#include <stddef.h>
+ 
+ #include "superblocks.h"
+ 
+@@ -107,7 +108,18 @@ static int probe_sysv(blkid_probe pr, co
+ 
+ 		if (sb->s_magic == cpu_to_le32(0xfd187e20) ||
+ 		    sb->s_magic == cpu_to_be32(0xfd187e20)) {
+-			blkid_probe_set_label(pr, sb->s_fname, sizeof(sb->s_fname));
++
++			if (blkid_probe_set_label(pr, sb->s_fname,
++						sizeof(sb->s_fname)))
++				return -1;
++
++			if (blkid_probe_set_magic(pr,
++					off + offsetof(struct sysv_super_block,
++								s_magic),
++					sizeof(sb->s_magic),
++					(unsigned char *) &sb->s_magic))
++				return -1;
++
+ 			return 0;
+ 		}
+ 	}
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/ufs.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/ufs.c
+@@ -15,6 +15,7 @@
+ #include <errno.h>
+ #include <ctype.h>
+ #include <stdint.h>
++#include <stddef.h>
+ 
+ #include "superblocks.h"
+ 
+@@ -205,6 +206,13 @@ found:
+ 	} else
+ 		blkid_probe_set_version(pr, "1");
+ 
++	if (blkid_probe_set_magic(pr,
++			(offsets[i] * 1024) +
++				offsetof(struct ufs_super_block, fs_magic),
++			sizeof(ufs->fs_magic),
++			(unsigned char *) &ufs->fs_magic))
++		return -1;
++
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/superblocks/via_raid.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/superblocks/via_raid.c
+@@ -52,6 +52,8 @@ static int probe_viaraid(blkid_probe pr,
+ 
+ 	if (pr->size < 0x10000)
+ 		return -1;
++	if (!S_ISREG(pr->mode) && !blkid_probe_is_wholedisk(pr))
++		return -1;
+ 
+ 	off = ((pr->size / 0x200)-1) * 0x200;
+ 
+@@ -69,6 +71,10 @@ static int probe_viaraid(blkid_probe pr,
+ 		return -1;
+ 	if (blkid_probe_sprintf_version(pr, "%u", v->version_number) != 0)
+ 		return -1;
++	if (blkid_probe_set_magic(pr, off,
++				sizeof(v->signature),
++				(unsigned char *) &v->signature))
++		return -1;
+ 	return 0;
+ }
+ 
+--- util-linux-ng-2.17.2.orig/shlibs/blkid/src/partitions/partitions.c
++++ util-linux-ng-2.17.2/shlibs/blkid/src/partitions/partitions.c
+@@ -566,6 +566,9 @@ static int partitions_probe(blkid_probe 
+ 	if (chn->binary)
+ 		partitions_init_data(pr, chn);
+ 
++	if (pr->prob_flags & BLKID_PARTS_IGNORE_PT)
++		return 1;
++
+ 	DBG(DEBUG_LOWPROBE,
+ 		printf("--> starting probing loop [PARTS idx=%d]\n",
+ 		chn->idx));
+@@ -652,6 +655,95 @@ int blkid_partitions_do_subprobe(blkid_p
+ 	return rc;
+ }
+ 
++/*
++ * This function is compatible with blkid_probe_get_partitions(), but the
++ * result is not stored in @pr and all probing is independent on the
++ * status of @pr. It's possible to call this function from arbitrary
++ * place without a care about @pr.
++ */
++static blkid_partlist blkid_probe_get_independent_partlist(blkid_probe pr)
++{
++
++	blkid_partlist ls = NULL, org_ls = NULL;
++	struct blkid_chain *chn = &pr->chains[BLKID_CHAIN_PARTS];
++	struct blkid_prval vals[BLKID_NVALS_PARTS];
++	int nvals = BLKID_NVALS_PARTS;
++	int idx;
++
++	/* save old results */
++	nvals = blkid_probe_chain_copy_vals(pr, chn, vals, nvals);
++	idx = chn->idx;
++	if (chn->data) {
++		org_ls = chn->data;
++		chn->data = NULL;
++	}
++
++	ls = blkid_probe_get_partitions(pr);
++
++	/* restore original results */
++	chn->data = org_ls;
++	chn->idx = idx;
++
++	blkid_probe_chain_reset_vals(pr, chn);
++	blkid_probe_append_vals(pr, vals, nvals);
++
++	return ls;
++}
++
++/*
++ * Returns 1 if the device is whole-disk and the area specified by @offset and
++ * @size is covered by any partition.
++ */
++int blkid_probe_is_covered_by_pt(blkid_probe pr,
++				 blkid_loff_t offset, blkid_loff_t size)
++{
++	blkid_partlist ls = NULL;
++	blkid_loff_t start, end;
++	int nparts, i, rc = 0;
++
++	DBG(DEBUG_LOWPROBE, printf(
++		"=> checking if off=%jd size=%jd covered by PT\n",
++		offset, size));
++
++	ls = blkid_probe_get_independent_partlist(pr);
++	if (!ls)
++		goto done;
++
++	nparts = blkid_partlist_numof_partitions(ls);
++	if (!nparts)
++		goto done;
++
++	end = (offset + size) >> 9;
++	start = offset >> 9;
++
++	/* check if the partition table fits into the device */
++	for (i = 0; i < nparts; i++) {
++		blkid_partition par = &ls->parts[i];
++
++		if (par->start + par->size > (pr->size >> 9)) {
++			DBG(DEBUG_LOWPROBE, printf("partition #%d overflows "
++					"device (off=%lu size=%lu)\n",
++					par->partno, par->start, par->size));
++			goto done;
++		}
++	}
++
++	/* check if the requested area is covered by PT */
++	for (i = 0; i < nparts; i++) {
++		blkid_partition par = &ls->parts[i];
++
++		if (start >= par->start && end <= par->start + par->size) {
++			rc = 1;
++			break;
++		}
++	}
++done:
++	partitions_free_data(pr, (void *)ls);
++
++	DBG(DEBUG_LOWPROBE, printf("<= %s covered by PT\n", rc ? "IS" : "NOT"));
++	return rc;
++}
++
+ /**
+  * blkid_known_pttype:
+  * @pttype: partiton name
+--- util-linux-ng-2.17.2.orig/misc-utils/blkid.c
++++ util-linux-ng-2.17.2/misc-utils/blkid.c
+@@ -423,33 +423,34 @@ static int lowprobe_device(blkid_probe p
+ 
+ 	if (fstat(fd, &st))
+ 		goto done;
+-	/*
+-	 * partitions probing
+-	 */
+-	blkid_probe_enable_superblocks(pr, 0);	/* enabled by default ;-( */
+ 
+ 	blkid_probe_enable_partitions(pr, 1);
+-	rc = blkid_do_fullprobe(pr);
+-	blkid_probe_enable_partitions(pr, 0);
+ 
+-	if (rc < 0)
+-		goto done;	/* -1 = error, 1 = nothing, 0 = succes */
+-
+-	/*
+-	 * Don't probe for FS/RAIDs on small devices
+-	 */
+-	if (rc || S_ISCHR(st.st_mode) ||
+-	    blkid_probe_get_size(pr) > 1024 * 1440) {
++	if (!S_ISCHR(st.st_mode) && blkid_probe_get_size(pr) <= 1024 * 1440) {
+ 		/*
+-		 * filesystems/RAIDs probing
++		 * check if the small disk is partitioned, if yes then
++		 * don't probe for filesystems.
+ 		 */
+-		blkid_probe_enable_superblocks(pr, 1);
++		blkid_probe_enable_superblocks(pr, 0);
+ 
+-		rc = blkid_do_safeprobe(pr);
++		rc = blkid_do_fullprobe(pr);
+ 		if (rc < 0)
+-			goto done;
++			goto done;	/* -1 = error, 1 = nothing, 0 = succes */
++
++		if (blkid_probe_lookup_value(pr, "PTTYPE", NULL, NULL) == 0)
++			/* partition table detected */
++			goto print_vals;
++
++		/* small whole-disk is unpartitioned, probe for filesystems only */
++		blkid_probe_enable_partitions(pr, 0);
+ 	}
+ 
++	blkid_probe_enable_superblocks(pr, 1);
++
++	rc = blkid_do_safeprobe(pr);
++	if (rc < 0)
++		goto done;
++print_vals:
+ 	nvals = blkid_probe_numof_values(pr);
+ 
+ 	if (output & OUTPUT_DEVICE_ONLY) {
+--- /dev/null
++++ util-linux-ng-2.17.2/tests/expected/blkid/md-raid1-part
+@@ -0,0 +1,58 @@
++Create partitions
++Device contains neither a valid DOS partition table, nor Sun, SGI or OSF disklabel
++
++Changes will remain in memory only, until you decide to write them.
++After that, of course, the previous content won't be recoverable.
++
++Warning: invalid flag 0x0000 of partition table 4 will be corrected by w(rite)
++
++WARNING: DOS-compatible mode is deprecated. It's strongly recommended to
++         switch off the mode (command 'c') and change display units to
++         sectors (command 'u').
++
++Command (m for help): DOS Compatibility flag is not set
++
++Command (m for help): Changing display/entry units to sectors
++
++Command (m for help): Command action
++   e   extended
++   p   primary partition (1-4)
++Partition number (1-4): First sector (2048-104447, default 2048): Using default value 2048
++Last sector, +sectors or +size{K,M,G} (2048-104447, default 104447): 
++Command (m for help): Command action
++   e   extended
++   p   primary partition (1-4)
++Partition number (1-4): First sector (53248-104447, default 53248): Using default value 53248
++Last sector, +sectors or +size{K,M,G} (53248-104447, default 104447): Using default value 104447
++
++Command (m for help): 
++Disk /dev/sdb: 53 MB, 53477376 bytes
++32 heads, 32 sectors/track, 102 cylinders, total 104448 sectors
++Units = sectors of 1 * 512 = 512 bytes
++Sector size (logical/physical): 512 bytes / 512 bytes
++I/O size (minimum/optimal): 512 bytes / 32768 bytes
++
++
++   Device Boot      Start         End      Blocks   Id  System
++/dev/sdb1            2048       53247       25600   83  Linux
++/dev/sdb2           53248      104447       25600   83  Linux
++
++Command (m for help): The partition table has been altered!
++
++Calling ioctl() to re-read partition table.
++Syncing disks.
++Create RAID1 device
++Probe whole-disk
++ID_PART_TABLE_TYPE=dos
++Probe first RAID member
++ID_FS_TYPE=linux_raid_member
++ID_FS_USAGE=raid
++
++
++ID_FS_VERSION=0.90.0
++Probe second RAID member
++ID_FS_TYPE=linux_raid_member
++ID_FS_USAGE=raid
++
++
++ID_FS_VERSION=0.90.0
+--- /dev/null
++++ util-linux-ng-2.17.2/tests/expected/blkid/md-raid1-whole
+@@ -0,0 +1,58 @@
++Initialize devices
++Create RAID device
++Create partitions on RAID device
++Device contains neither a valid DOS partition table, nor Sun, SGI or OSF disklabel
++
++Changes will remain in memory only, until you decide to write them.
++After that, of course, the previous content won't be recoverable.
++
++Warning: invalid flag 0x0000 of partition table 4 will be corrected by w(rite)
++
++WARNING: DOS-compatible mode is deprecated. It's strongly recommended to
++         switch off the mode (command 'c') and change display units to
++         sectors (command 'u').
++
++Command (m for help): DOS Compatibility flag is not set
++
++Command (m for help): Changing display/entry units to sectors
++
++Command (m for help): Command action
++   e   extended
++   p   primary partition (1-4)
++Partition number (1-4): First sector (2048-102271, default 2048): Using default value 2048
++Last sector, +sectors or +size{K,M,G} (2048-102271, default 102271): 
++Command (m for help): Command action
++   e   extended
++   p   primary partition (1-4)
++Partition number (1-4): First sector (22528-102271, default 22528): Using default value 22528
++Last sector, +sectors or +size{K,M,G} (22528-102271, default 102271): 
++Command (m for help): 
++Disk /dev/md8: 52 MB, 52363264 bytes
++2 heads, 4 sectors/track, 12784 cylinders, total 102272 sectors
++Units = sectors of 1 * 512 = 512 bytes
++Sector size (logical/physical): 512 bytes / 512 bytes
++I/O size (minimum/optimal): 512 bytes / 512 bytes
++
++
++    Device Boot      Start         End      Blocks   Id  System
++/dev/md8p1            2048       22527       10240   83  Linux
++/dev/md8p2           22528       43007       10240   83  Linux
++
++Command (m for help): The partition table has been altered!
++
++Calling ioctl() to re-read partition table.
++Syncing disks.
++Probe first RAID member
++ID_FS_TYPE=linux_raid_member
++ID_FS_USAGE=raid
++
++
++ID_FS_VERSION=0.90.0
++Probe second RAID member
++ID_FS_TYPE=linux_raid_member
++ID_FS_USAGE=raid
++
++
++ID_FS_VERSION=0.90.0
++Stop RAID device
++Deinitialize devices
+--- util-linux-ng-2.17.2.orig/tests/functions.sh
++++ util-linux-ng-2.17.2/tests/functions.sh
+@@ -256,7 +256,7 @@ function ts_image_init {
+ 
+ function ts_device_init {
+ 	local img=$(ts_image_init $1 $2)
+-	local dev=$($TS_CMD_LOSETUP -s -f "$img")
++	local dev=$($TS_CMD_LOSETUP --show -f "$img")
+ 
+ 	if [ -z "$dev" ]; then
+ 		ts_device_deinit $dev
+--- /dev/null
++++ util-linux-ng-2.17.2/tests/ts/blkid/md-raid1-part
+@@ -0,0 +1,92 @@
++#!/bin/bash
++
++#
++# Copyright (C) 2010 Karel Zak <kzak@redhat.com>
++#
++# This file is part of util-linux-ng.
++#
++# This file is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This file is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++
++TS_TOPDIR="$(dirname $0)/../.."
++TS_DESC="MD raid1 (last partition)"
++
++. $TS_TOPDIR/functions.sh
++ts_init "$*"
++ts_skip_nonroot
++
++modprobe --dry-run --quiet scsi_debug
++[ "$?" == 0 ] || ts_skip "missing scsi_debug module"
++[ -x /sbin/mdadm ] || ts_skip "missing mdadm"
++
++rmmod scsi_debug &> /dev/null
++modprobe scsi_debug dev_size_mb=51 sector_size=512
++[ "$?" == 0 ] || ts_die "Cannot init device"
++
++sleep 3
++
++DEVNAME=$(grep scsi_debug /sys/block/*/device/model | awk -F '/' '{print $4}')
++[ "x${DEVNAME}" == "x" ] && ts_die "Cannot found device"
++
++DEVICE="/dev/${DEVNAME}"
++
++ts_log "Create partitions"
++$TS_CMD_FDISK ${DEVICE} >> $TS_OUTPUT 2>&1 <<EOF
++c
++u
++n
++p
++1
++
+++25M
++n
++p
++2
++
++
++p
++w
++q
++EOF
++
++sleep 3
++MD_DEVNAME=md8
++MD_DEVICE=/dev/${MD_DEVNAME}
++
++###exit 1
++
++ts_log "Create RAID1 device"
++/sbin/mdadm -q -S ${MD_DEVICE} &> /dev/null
++/sbin/mdadm -q --create ${MD_DEVICE} --metadata=0.90 --chunk=64 --level=1 \
++	    --raid-devices=2 ${DEVICE}1 ${DEVICE}2 >> $TS_OUTPUT 2>&1
++
++sleep 3
++
++ts_log "Probe whole-disk"
++$TS_CMD_BLKID -p -o udev ${DEVICE} 2>&1 | sort >> $TS_OUTPUT
++
++ts_log "Probe first RAID member"
++$TS_CMD_BLKID -p -o udev ${DEVICE}1 2>&1 | sort >> $TS_OUTPUT
++
++ts_log "Probe second RAID member"
++$TS_CMD_BLKID -p -o udev ${DEVICE}2 2>&1 | sort >> $TS_OUTPUT
++
++/sbin/mdadm -q -S ${MD_DEVICE} >> $TS_OUTPUT 2>&1
++
++sleep 3
++rmmod scsi_debug
++
++# remove disk ID and generated UUIDs
++sed -i -e 's/Disk identifier:.*//g' $TS_OUTPUT
++sed -i -e 's/Building a new.*//g' $TS_OUTPUT
++sed -i -e 's/ID_FS_UUID.*//g' $TS_OUTPUT
++
++ts_finalize
+--- /dev/null
++++ util-linux-ng-2.17.2/tests/ts/blkid/md-raid1-whole
+@@ -0,0 +1,88 @@
++#!/bin/bash
++
++#
++# Copyright (C) 2010 Karel Zak <kzak@redhat.com>
++#
++# This file is part of util-linux-ng.
++#
++# This file is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This file is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++
++TS_TOPDIR="$(dirname $0)/../.."
++TS_DESC="MD raid1 (whole-disks)"
++
++. $TS_TOPDIR/functions.sh
++ts_init "$*"
++ts_skip_nonroot
++[ -x /sbin/mdadm ] || ts_skip "missing mdadm"
++
++set -o pipefail
++
++ts_log "Initialize devices"
++IMGNAME="${TS_OUTDIR}/${TS_TESTNAME}"
++
++DEVICE1=$(ts_device_init 50 ${IMGNAME}1.img)
++[ "$?" == 0 ] || ts_die "Cannot init device1"
++
++DEVICE2=$(ts_device_init 50 ${IMGNAME}2.img)
++[ "$?" == 0 ] || ts_die "Cannot init device2" $DEVICE1
++
++MD_DEVNAME=md8
++MD_DEVICE=/dev/${MD_DEVNAME}
++
++/sbin/mdadm -q -S ${MD_DEVICE} &> /dev/null
++
++ts_log "Create RAID device"
++/sbin/mdadm -q --create ${MD_DEVICE} --metadata=0.90 --chunk=64 --level=1 \
++	    --raid-devices=2 ${DEVICE1} ${DEVICE2} >> $TS_OUTPUT 2>&1
++
++ts_log "Create partitions on RAID device"
++$TS_CMD_FDISK ${MD_DEVICE} >> $TS_OUTPUT 2>&1 <<EOF
++c
++u
++n
++p
++1
++
+++10M
++n
++p
++2
++
+++10M
++p
++w
++q
++EOF
++
++sleep 3
++
++ts_log "Probe first RAID member"
++$TS_CMD_BLKID -p -o udev $DEVICE1 2>&1 | sort >> $TS_OUTPUT
++
++ts_log "Probe second RAID member"
++$TS_CMD_BLKID -p -o udev $DEVICE1 2>&1 | sort >> $TS_OUTPUT
++
++ts_log "Stop RAID device"
++/sbin/mdadm -q -S ${MD_DEVICE} >> $TS_OUTPUT 2>&1
++
++sleep 3
++
++ts_log "Deinitialize devices"
++ts_device_deinit $DEVICE1
++ts_device_deinit $DEVICE2
++
++# remove disk ID and generated UUIDs
++sed -i -e 's/Disk identifier:.*//g' $TS_OUTPUT
++sed -i -e 's/Building a new.*//g' $TS_OUTPUT
++sed -i -e 's/ID_FS_UUID.*//g' $TS_OUTPUT
++
++ts_finalize

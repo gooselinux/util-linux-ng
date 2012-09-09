@@ -1,0 +1,52 @@
+Upstream patches:
+
+	From d6d9cc6ea158ef3b2525742ee3f80c4a3be8b049 Mon Sep 17 00:00:00 2001
+	From: Phillip Susi <psusi@cfl.rr.com>
+	Date: Wed, 31 Mar 2010 15:52:08 +0200
+	Subject: [PATCH] partx: do not add nonexistent partitions
+
+	This simple patch fixes partx -a to not add nonexistent zero length
+	partitions for unused primary partition slots to to the kernel. This
+	makes partx conform to the usual kernel behavior.
+
+	Signed-off-by: Phillip Susi <psusi@cfl.rr.com>
+	Signed-off-by: Karel Zak <kzak@redhat.com>
+
+
+	From c86dda7b36e3a6cfc63b9c03f7d275d715d35fd0 Mon Sep 17 00:00:00 2001
+	From: Karel Zak <kzak@redhat.com>
+	Date: Wed, 31 Mar 2010 16:38:51 +0200
+	Subject: [PATCH] partx: fix infinite loop
+
+	On Wed, Mar 24, 2010 at 04:39:35PM -0400, Phillip Susi wrote:
+	> I noticed that running partx -d /dev/sda hangs so I looked into it
+	> and it seems that it keeps trying to delete partitions forever.
+
+	Reported-By: Phillip Susi <psusi@cfl.rr.com>
+	Signed-off-by: Karel Zak <kzak@redhat.com>
+
+---
+ partx/partx.c |    5 +++++
+ 1 file changed, 5 insertions(+)
+
+--- util-linux-ng-2.17.2.orig/partx/partx.c
++++ util-linux-ng-2.17.2/partx/partx.c
+@@ -178,6 +178,8 @@ main(int argc, char **argv){
+ 		while (upper == 0 || lower <= upper) {
+ 			int err;
+ 
++			if (lower > MAXSLICES)
++				break;
+ 			pt.pno = lower;
+ 			pt.start = 0;
+ 			pt.length = 0;
+@@ -295,6 +297,9 @@ main(int argc, char **argv){
+ 				}
+ 			    }
+ 			    for (j=0; j<n; j++) {
++			        /* skip unused/empty partitions */
++				if (slices[j].size == 0)
++				    continue;
+ 				pt.pno = lower+j;
+ 				pt.start = 512 * (long long) slices[j].start;
+ 				pt.length = 512 * (long long) slices[j].size;
