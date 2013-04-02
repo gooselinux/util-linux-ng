@@ -1,0 +1,91 @@
+
+Based on upstream patch:
+
+commit 6a2de3f13134dfd49eb93c7b15552de81b868c8a
+Author: Karel Zak <kzak@redhat.com>
+Date:   Wed Apr 28 14:40:46 2010 +0200
+
+    fdisk: improve 'move begin of partition' command
+    
+    The 'b' command ("move beginning of data in a partition")
+    implementation is too restricted. For example:
+    
+         Device Boot      Start         End      Blocks   Id  System
+      /dev/sdb1            2048       22527       10240   83  Linux
+      ....
+      Partition number (1-4): 1
+      New beginning of data (2048-22527, default 2048):
+                             ^^^^^^^^^^
+    
+    the range is defined by the current partition size. New version:
+    
+      Partition number (1-4): 1
+      New beginning of data (1-22527, default 2048):
+                             ^^^^^^^
+    
+    allows to move the begin to arbitrary place if the place is not
+    allocated by any other partition. This is useful for people who don't
+    want to use the default partitioning (1MiB offset, 1MiB grain).
+    
+    The 'b' command is expert command and does not force users to use an
+    aligned LBA (fdisk(8) still prints warning (in 'p' command) if any
+    partition is not aligned to the physical sector boundary).
+    
+    Signed-off-by: Karel Zak <kzak@redhat.com>
+
+
+diff -up util-linux-ng-2.17.2/fdisk/fdisk.c.kzak util-linux-ng-2.17.2/fdisk/fdisk.c
+--- util-linux-ng-2.17.2/fdisk/fdisk.c.kzak	2010-03-22 09:21:34.000000000 +0100
++++ util-linux-ng-2.17.2/fdisk/fdisk.c	2010-05-03 14:32:34.000000000 +0200
+@@ -2643,7 +2643,8 @@ static void
+ move_begin(int i) {
+ 	struct pte *pe = &ptes[i];
+ 	struct partition *p = pe->part_table;
+-	unsigned int new, first;
++	unsigned int new, free_start, curr_start, last;
++	int x;
+ 
+ 	if (warn_geometry())
+ 		return;
+@@ -2651,13 +2652,37 @@ move_begin(int i) {
+ 		printf(_("Partition %d has no data area\n"), i + 1);
+ 		return;
+ 	}
+-	first = get_partition_start(pe);
+-	new = read_int(first, first, first + get_nr_sects(p) - 1, first,
++
++	/* the default start is at the second sector of the disk or at the
++	 * second sector of the extended partition
++	 */
++	free_start = pe->offset ? pe->offset + 1 : 1;
++
++	curr_start = get_partition_start(pe);
++
++	/* look for a free space before the current start of the partition */
++	for (x = 0; x < partitions; x++) {
++		unsigned int end;
++		struct pte *prev_pe = &ptes[x];
++		struct partition *prev_p = prev_pe->part_table;
++
++		if (!prev_p)
++			continue;
++		end = get_partition_start(prev_pe) + get_nr_sects(prev_p);
++
++		if (!is_cleared_partition(prev_p) &&
++		    end > free_start && end <= curr_start)
++			free_start = end;
++	}
++
++	last = get_partition_start(pe) + get_nr_sects(p) - 1;
++
++	new = read_int(free_start, curr_start, last, free_start,
+ 		       _("New beginning of data")) - pe->offset;
+ 
+ 	if (new != get_nr_sects(p)) {
+-		first = get_nr_sects(p) + get_start_sect(p) - new;
+-		set_nr_sects(p, first);
++		unsigned int sects = get_nr_sects(p) + get_start_sect(p) - new;
++		set_nr_sects(p, sects);
+ 		set_start_sect(p, new);
+ 		pe->changed = 1;
+ 	}

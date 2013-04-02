@@ -1,0 +1,55 @@
+From b17df865f12a397c19db8f1b9ceb99d923ff4e0d Mon Sep 17 00:00:00 2001
+From: Karel Zak <kzak@redhat.com>
+Date: Mon, 14 Jun 2010 10:43:00 +0200
+Subject: [PATCH] fdisk: use /dev/{mapper,mpath}/namep<N>
+
+The usual behavior in distributions is to use p<N> suffix for DM
+partitions.
+
+Signed-off-by: Karel Zak <kzak@redhat.com>
+---
+ fdisk/partname.c    |   13 ++++++++++---
+ include/pathnames.h |    3 +++
+ 2 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/fdisk/partname.c b/fdisk/partname.c
+index 1fe3087..18afa55 100644
+--- a/fdisk/partname.c
++++ b/fdisk/partname.c
+@@ -31,9 +31,16 @@ partname(char *dev, int pno, int lth) {
+ 	/* udev names partitions by appending -partN
+ 	   e.g. ata-SAMSUNG_SV8004H_0357J1FT712448-part1 */
+ 	if ((strncmp(dev, _PATH_DEV_BYID, strlen(_PATH_DEV_BYID)) == 0) ||
+-	     strncmp(dev, _PATH_DEV_BYPATH, strlen(_PATH_DEV_BYPATH)) == 0) {
+-	       p = "-part";
+-	}
++	     strncmp(dev, _PATH_DEV_BYPATH, strlen(_PATH_DEV_BYPATH)) == 0)
++		p = "-part";
++
++	/* /dev/mapper and /dev/mpath usually use "p<N>"
++	 * (note that this is not a strict rule, the suffix is possible to define
++	 *  on kpartx command line. This code follows usual behavior.)
++	 */
++	else if (strncmp(dev, _PATH_DEV_DM, strlen(_PATH_DEV_DM)) == 0 ||
++		 strncmp(dev, _PATH_DEV_MPATH, strlen(_PATH_DEV_MPATH)) == 0)
++		p = "p";
+ 
+ 	wp = strlen(p);
+ 
+diff --git a/include/pathnames.h b/include/pathnames.h
+index c057295..02e1bc1 100644
+--- a/include/pathnames.h
++++ b/include/pathnames.h
+@@ -109,6 +109,9 @@
+ #define _PATH_DEV_LOOP		"/dev/loop"
+ #define _PATH_DEV_TTY		"/dev/tty"
+ 
++#define _PATH_DEV_DM		"/dev/mapper"
++#define _PATH_DEV_MPATH		"/dev/mpath"
++
+ /* udev paths */
+ #define _PATH_DEV_BYLABEL	"/dev/disk/by-label"
+ #define _PATH_DEV_BYUUID	"/dev/disk/by-uuid"
+-- 
+1.6.6.1
+

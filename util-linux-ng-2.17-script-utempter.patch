@@ -1,0 +1,511 @@
+Based on usptream patch:
+
+commit f0bc3fa0cf45f484ea696ef063a10b65d1a45e13
+Author: Karel Zak <kzak@redhat.com>
+Date:   Thu Apr 29 12:25:06 2010 +0200
+
+    script: optionally compile with libutempter to update utmp
+    
+    Use --with-utempter to enable utempter support. The libutempter calls
+    /usr/libexec/utempter/utempter suid helper to update utmp and wtmp
+    files.
+    
+    Old version:
+        $ script
+        Script started, file is typescript
+    
+        $ who i am
+    
+        $ exit
+        Script done, file is typescript
+    
+    New version:
+        $ script
+        Script started, file is typescript
+    
+        $ who i am
+        kzak     pts/6        2010-04-29 12:30
+    
+        $ exit
+        Script done, file is typescript
+    
+    Addresses: http://bugzilla.redhat.com/show_bug.cgi?id=477753
+    Signed-off-by: Karel Zak <kzak@redhat.com>
+
+diff -up util-linux-ng-2.17.2/config.h.in.kzak util-linux-ng-2.17.2/config.h.in
+--- util-linux-ng-2.17.2/config.h.in.kzak	2010-03-22 10:12:30.000000000 +0100
++++ util-linux-ng-2.17.2/config.h.in	2010-05-03 14:15:27.000000000 +0200
+@@ -147,6 +147,9 @@
+ /* Define to 1 if you have the `termcap' library (-ltermcap). */
+ #undef HAVE_LIBTERMCAP
+ 
++/* Define to 1 if you have the `utempter' library (-lutempter). */
++#undef HAVE_LIBUTEMPTER
++
+ /* Define to 1 if you have the `util' library (-lutil). */
+ #undef HAVE_LIBUTIL
+ 
+diff -up util-linux-ng-2.17.2/configure.ac.kzak util-linux-ng-2.17.2/configure.ac
+--- util-linux-ng-2.17.2/configure.ac.kzak	2010-03-22 10:08:00.000000000 +0100
++++ util-linux-ng-2.17.2/configure.ac	2010-05-03 14:15:28.000000000 +0200
+@@ -448,6 +448,21 @@ fi
+ AM_CONDITIONAL(USE_SLANG, test "x$use_slang" = xyes)
+ 
+ 
++AC_ARG_WITH([utempter],
++  AS_HELP_STRING([--with-utempter], [compile script(1) with libutempter]),
++  [], with_utempter=no
++)
++
++if test "x$with_utempter" = xyes; then
++  UTIL_CHECK_LIB(utempter, utempter_add_record)
++  if test "x$have_utempter" = xno; then
++    AC_MSG_ERROR([utempter selected but libutempter not found])
++  fi
++else
++  AM_CONDITIONAL(HAVE_UTEMPTER, false)
++fi
++
++
+ AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+ #define _XOPEN_SOURCE
+ #include <unistd.h>
+diff -up util-linux-ng-2.17.2/configure.kzak util-linux-ng-2.17.2/configure
+--- util-linux-ng-2.17.2/configure.kzak	2010-03-22 10:12:08.000000000 +0100
++++ util-linux-ng-2.17.2/configure	2010-05-03 14:15:27.000000000 +0200
+@@ -881,6 +881,8 @@ HAVE_PIVOT_ROOT_FALSE
+ HAVE_PIVOT_ROOT_TRUE
+ NEED_LIBCRYPT_FALSE
+ NEED_LIBCRYPT_TRUE
++HAVE_UTEMPTER_FALSE
++HAVE_UTEMPTER_TRUE
+ USE_SLANG_FALSE
+ USE_SLANG_TRUE
+ HAVE_TINFO_FALSE
+@@ -1090,6 +1092,7 @@ with_libiconv_prefix
+ with_libintl_prefix
+ with_ncurses
+ with_slang
++with_utempter
+ enable_arch
+ enable_agetty
+ enable_cramfs
+@@ -1847,6 +1850,7 @@ Optional Packages:
+   --with-ncurses          build with non-wide ncurses, default is wide version
+                           (--without-ncurses disables all ncurses(w) support)
+   --with-slang            compile cfdisk with slang
++  --with-utempter         compile script(1) with libutempter
+   --without-pam           compile login-utils without PAM support
+   --with-selinux          compile with SELinux support
+   --with-audit            compile with audit support
+@@ -6385,13 +6389,13 @@ if test "${lt_cv_nm_interface+set}" = se
+ else
+   lt_cv_nm_interface="BSD nm"
+   echo "int some_variable = 0;" > conftest.$ac_ext
+-  (eval echo "\"\$as_me:6388: $ac_compile\"" >&5)
++  (eval echo "\"\$as_me:6392: $ac_compile\"" >&5)
+   (eval "$ac_compile" 2>conftest.err)
+   cat conftest.err >&5
+-  (eval echo "\"\$as_me:6391: $NM \\\"conftest.$ac_objext\\\"\"" >&5)
++  (eval echo "\"\$as_me:6395: $NM \\\"conftest.$ac_objext\\\"\"" >&5)
+   (eval "$NM \"conftest.$ac_objext\"" 2>conftest.err > conftest.out)
+   cat conftest.err >&5
+-  (eval echo "\"\$as_me:6394: output\"" >&5)
++  (eval echo "\"\$as_me:6398: output\"" >&5)
+   cat conftest.out >&5
+   if $GREP 'External.*some_variable' conftest.out > /dev/null; then
+     lt_cv_nm_interface="MS dumpbin"
+@@ -7596,7 +7600,7 @@ ia64-*-hpux*)
+   ;;
+ *-*-irix6*)
+   # Find out which ABI we are using.
+-  echo '#line 7599 "configure"' > conftest.$ac_ext
++  echo '#line 7603 "configure"' > conftest.$ac_ext
+   if { (eval echo "$as_me:$LINENO: \"$ac_compile\"") >&5
+   (eval $ac_compile) 2>&5
+   ac_status=$?
+@@ -8965,11 +8969,11 @@ else
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:8968: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:8972: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>conftest.err)
+    ac_status=$?
+    cat conftest.err >&5
+-   echo "$as_me:8972: \$? = $ac_status" >&5
++   echo "$as_me:8976: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s "$ac_outfile"; then
+      # The compiler can only warn and ignore the option if not recognized
+      # So say no if there are warnings other than the usual output.
+@@ -9304,11 +9308,11 @@ else
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:9307: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:9311: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>conftest.err)
+    ac_status=$?
+    cat conftest.err >&5
+-   echo "$as_me:9311: \$? = $ac_status" >&5
++   echo "$as_me:9315: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s "$ac_outfile"; then
+      # The compiler can only warn and ignore the option if not recognized
+      # So say no if there are warnings other than the usual output.
+@@ -9409,11 +9413,11 @@ else
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:9412: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:9416: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>out/conftest.err)
+    ac_status=$?
+    cat out/conftest.err >&5
+-   echo "$as_me:9416: \$? = $ac_status" >&5
++   echo "$as_me:9420: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s out/conftest2.$ac_objext
+    then
+      # The compiler can only warn and ignore the option if not recognized
+@@ -9464,11 +9468,11 @@ else
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:9467: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:9471: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>out/conftest.err)
+    ac_status=$?
+    cat out/conftest.err >&5
+-   echo "$as_me:9471: \$? = $ac_status" >&5
++   echo "$as_me:9475: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s out/conftest2.$ac_objext
+    then
+      # The compiler can only warn and ignore the option if not recognized
+@@ -12267,7 +12271,7 @@ else
+   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
+   lt_status=$lt_dlunknown
+   cat > conftest.$ac_ext <<_LT_EOF
+-#line 12270 "configure"
++#line 12274 "configure"
+ #include "confdefs.h"
+ 
+ #if HAVE_DLFCN_H
+@@ -12363,7 +12367,7 @@ else
+   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
+   lt_status=$lt_dlunknown
+   cat > conftest.$ac_ext <<_LT_EOF
+-#line 12366 "configure"
++#line 12370 "configure"
+ #include "confdefs.h"
+ 
+ #if HAVE_DLFCN_H
+@@ -18324,6 +18328,123 @@ fi
+ 
+ 
+ 
++
++# Check whether --with-utempter was given.
++if test "${with_utempter+set}" = set; then
++  withval=$with_utempter;
++else
++  with_utempter=no
++
++fi
++
++
++if test "x$with_utempter" = xyes; then
++
++
++  have_utempter=yes
++
++{ $as_echo "$as_me:$LINENO: checking for utempter_add_record in -lutempter" >&5
++$as_echo_n "checking for utempter_add_record in -lutempter... " >&6; }
++if test "${ac_cv_lib_utempter_utempter_add_record+set}" = set; then
++  $as_echo_n "(cached) " >&6
++else
++  ac_check_lib_save_LIBS=$LIBS
++LIBS="-lutempter  $LIBS"
++cat >conftest.$ac_ext <<_ACEOF
++/* confdefs.h.  */
++_ACEOF
++cat confdefs.h >>conftest.$ac_ext
++cat >>conftest.$ac_ext <<_ACEOF
++/* end confdefs.h.  */
++
++/* Override any GCC internal prototype to avoid an error.
++   Use char because int might match the return type of a GCC
++   builtin and then its argument prototype would still apply.  */
++#ifdef __cplusplus
++extern "C"
++#endif
++char utempter_add_record ();
++int
++main ()
++{
++return utempter_add_record ();
++  ;
++  return 0;
++}
++_ACEOF
++rm -f conftest.$ac_objext conftest$ac_exeext
++if { (ac_try="$ac_link"
++case "(($ac_try" in
++  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
++  *) ac_try_echo=$ac_try;;
++esac
++eval ac_try_echo="\"\$as_me:$LINENO: $ac_try_echo\""
++$as_echo "$ac_try_echo") >&5
++  (eval "$ac_link") 2>conftest.er1
++  ac_status=$?
++  grep -v '^ *+' conftest.er1 >conftest.err
++  rm -f conftest.er1
++  cat conftest.err >&5
++  $as_echo "$as_me:$LINENO: \$? = $ac_status" >&5
++  (exit $ac_status); } && {
++	 test -z "$ac_c_werror_flag" ||
++	 test ! -s conftest.err
++       } && test -s conftest$ac_exeext && {
++	 test "$cross_compiling" = yes ||
++	 $as_test_x conftest$ac_exeext
++       }; then
++  ac_cv_lib_utempter_utempter_add_record=yes
++else
++  $as_echo "$as_me: failed program was:" >&5
++sed 's/^/| /' conftest.$ac_ext >&5
++
++	ac_cv_lib_utempter_utempter_add_record=no
++fi
++
++rm -rf conftest.dSYM
++rm -f core conftest.err conftest.$ac_objext conftest_ipa8_conftest.oo \
++      conftest$ac_exeext conftest.$ac_ext
++LIBS=$ac_check_lib_save_LIBS
++fi
++{ $as_echo "$as_me:$LINENO: result: $ac_cv_lib_utempter_utempter_add_record" >&5
++$as_echo "$ac_cv_lib_utempter_utempter_add_record" >&6; }
++if test "x$ac_cv_lib_utempter_utempter_add_record" = x""yes; then
++  cat >>confdefs.h <<_ACEOF
++#define HAVE_LIBUTEMPTER 1
++_ACEOF
++
++  LIBS="-lutempter $LIBS"
++
++else
++  have_utempter=no
++fi
++
++   if test $have_utempter = yes; then
++  HAVE_UTEMPTER_TRUE=
++  HAVE_UTEMPTER_FALSE='#'
++else
++  HAVE_UTEMPTER_TRUE='#'
++  HAVE_UTEMPTER_FALSE=
++fi
++
++
++  if test "x$have_utempter" = xno; then
++    { { $as_echo "$as_me:$LINENO: error: utempter selected but libutempter not found" >&5
++$as_echo "$as_me: error: utempter selected but libutempter not found" >&2;}
++   { (exit 1); exit 1; }; }
++  fi
++else
++   if false; then
++  HAVE_UTEMPTER_TRUE=
++  HAVE_UTEMPTER_FALSE='#'
++else
++  HAVE_UTEMPTER_TRUE='#'
++  HAVE_UTEMPTER_FALSE=
++fi
++
++fi
++
++
+ cat >conftest.$ac_ext <<_ACEOF
+ /* confdefs.h.  */
+ _ACEOF
+@@ -22336,6 +22457,20 @@ $as_echo "$as_me: error: conditional \"U
+ Usually this means the macro was only invoked conditionally." >&2;}
+    { (exit 1); exit 1; }; }
+ fi
++if test -z "${HAVE_UTEMPTER_TRUE}" && test -z "${HAVE_UTEMPTER_FALSE}"; then
++  { { $as_echo "$as_me:$LINENO: error: conditional \"HAVE_UTEMPTER\" was never defined.
++Usually this means the macro was only invoked conditionally." >&5
++$as_echo "$as_me: error: conditional \"HAVE_UTEMPTER\" was never defined.
++Usually this means the macro was only invoked conditionally." >&2;}
++   { (exit 1); exit 1; }; }
++fi
++if test -z "${HAVE_UTEMPTER_TRUE}" && test -z "${HAVE_UTEMPTER_FALSE}"; then
++  { { $as_echo "$as_me:$LINENO: error: conditional \"HAVE_UTEMPTER\" was never defined.
++Usually this means the macro was only invoked conditionally." >&5
++$as_echo "$as_me: error: conditional \"HAVE_UTEMPTER\" was never defined.
++Usually this means the macro was only invoked conditionally." >&2;}
++   { (exit 1); exit 1; }; }
++fi
+ if test -z "${NEED_LIBCRYPT_TRUE}" && test -z "${NEED_LIBCRYPT_FALSE}"; then
+   { { $as_echo "$as_me:$LINENO: error: conditional \"NEED_LIBCRYPT\" was never defined.
+ Usually this means the macro was only invoked conditionally." >&5
+diff -up util-linux-ng-2.17.2/misc-utils/Makefile.am.kzak util-linux-ng-2.17.2/misc-utils/Makefile.am
+--- util-linux-ng-2.17.2/misc-utils/Makefile.am.kzak	2010-03-22 09:05:42.000000000 +0100
++++ util-linux-ng-2.17.2/misc-utils/Makefile.am	2010-05-03 14:15:28.000000000 +0200
+@@ -11,6 +11,7 @@ usrbin_exec_PROGRAMS = cal ddate logger 
+ EXTRA_DIST += README.cal README.ddate README.namei README.namei2
+ 
+ mcookie_SOURCES = mcookie.c ../lib/md5.c
++script_LDADD =
+ 
+ usrbin_exec_SCRIPTS = chkdupexe
+ 
+@@ -64,7 +65,11 @@ endif
+ endif
+ 
+ if HAVE_UTIL
+-script_LDADD = -lutil
++script_LDADD += -lutil
++endif
++
++if HAVE_UTEMPTER
++script_LDADD += -lutempter
+ endif
+ 
+ if HAVE_NCURSES
+diff -up util-linux-ng-2.17.2/misc-utils/Makefile.in.kzak util-linux-ng-2.17.2/misc-utils/Makefile.in
+--- util-linux-ng-2.17.2/misc-utils/Makefile.in.kzak	2010-03-22 10:12:05.000000000 +0100
++++ util-linux-ng-2.17.2/misc-utils/Makefile.in	2010-05-03 14:15:28.000000000 +0200
+@@ -55,15 +55,17 @@ usrbin_exec_PROGRAMS = cal$(EXEEXT) ddat
+ @BUILD_LIBBLKID_TRUE@am__append_5 = blkid findfs wipefs
+ @BUILD_LIBBLKID_TRUE@am__append_6 = blkid.8 findfs.8 wipefs.8
+ @BUILD_LIBBLKID_TRUE@@HAVE_STATIC_BLKID_TRUE@am__append_7 = blkid.static
+-@HAVE_NCURSES_TRUE@@LINUX_TRUE@am__append_8 = setterm
+-@HAVE_NCURSES_TRUE@@LINUX_TRUE@am__append_9 = setterm.1
+-@BUILD_KILL_TRUE@am__append_10 = kill
+-@BUILD_KILL_TRUE@am__append_11 = kill.1
+-@BUILD_RENAME_TRUE@am__append_12 = rename
+-@BUILD_RENAME_TRUE@am__append_13 = rename.1
+-@BUILD_RESET_TRUE@am__append_14 = reset.1
+-@BUILD_WRITE_TRUE@am__append_15 = write
+-@BUILD_WRITE_TRUE@am__append_16 = write.1
++@HAVE_UTIL_TRUE@am__append_8 = -lutil
++@HAVE_UTEMPTER_TRUE@am__append_9 = -lutempter
++@HAVE_NCURSES_TRUE@@LINUX_TRUE@am__append_10 = setterm
++@HAVE_NCURSES_TRUE@@LINUX_TRUE@am__append_11 = setterm.1
++@BUILD_KILL_TRUE@am__append_12 = kill
++@BUILD_KILL_TRUE@am__append_13 = kill.1
++@BUILD_RENAME_TRUE@am__append_14 = rename
++@BUILD_RENAME_TRUE@am__append_15 = rename.1
++@BUILD_RESET_TRUE@am__append_16 = reset.1
++@BUILD_WRITE_TRUE@am__append_17 = write
++@BUILD_WRITE_TRUE@am__append_18 = write.1
+ subdir = misc-utils
+ ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
+ am__aclocal_m4_deps = $(top_srcdir)/m4/gettext.m4 \
+@@ -150,7 +152,8 @@ rename_OBJECTS = rename.$(OBJEXT)
+ rename_LDADD = $(LDADD)
+ script_SOURCES = script.c
+ script_OBJECTS = script.$(OBJEXT)
+-script_DEPENDENCIES =
++am__DEPENDENCIES_1 =
++script_DEPENDENCIES = $(am__DEPENDENCIES_1) $(am__DEPENDENCIES_1)
+ scriptreplay_SOURCES = scriptreplay.c
+ scriptreplay_OBJECTS = scriptreplay.$(OBJEXT)
+ scriptreplay_LDADD = $(LDADD)
+@@ -431,13 +434,14 @@ ul_libuuid_la = $(top_builddir)/shlibs/u
+ EXTRA_DIST = README.flushb uuidd.rc README.cal README.ddate \
+ 	README.namei README.namei2 README.reset reset.033c
+ mcookie_SOURCES = mcookie.c ../lib/md5.c
++script_LDADD = $(am__append_8) $(am__append_9)
+ usrbin_exec_SCRIPTS = chkdupexe
+ CLEANFILES = chkdupexe
+ dist_man_MANS = cal.1 chkdupexe.1 ddate.1 logger.1 look.1 mcookie.1 \
+ 	namei.1 script.1 whereis.1 scriptreplay.1 $(am__append_2) \
+-	$(am__append_4) $(am__append_6) $(am__append_9) \
+-	$(am__append_11) $(am__append_13) $(am__append_14) \
+-	$(am__append_16)
++	$(am__append_4) $(am__append_6) $(am__append_11) \
++	$(am__append_13) $(am__append_15) $(am__append_16) \
++	$(am__append_18)
+ @BUILD_LIBUUID_TRUE@uuidgen_LDADD = $(ul_libuuid_la)
+ @BUILD_LIBUUID_TRUE@uuidgen_CFLAGS = $(AM_CFLAGS) -I$(ul_libuuid_srcdir)
+ @BUILD_LIBUUID_TRUE@@BUILD_UUIDD_TRUE@uuidd_LDADD = $(ul_libuuid_la)
+@@ -456,7 +460,6 @@ dist_man_MANS = cal.1 chkdupexe.1 ddate.
+ @HAVE_NCURSES_FALSE@@HAVE_TERMCAP_TRUE@@HAVE_TINFO_FALSE@cal_LDADD = -ltermcap
+ @HAVE_NCURSES_TRUE@@HAVE_TINFO_FALSE@cal_LDADD = @NCURSES_LIBS@
+ @HAVE_TINFO_TRUE@cal_LDADD = -ltinfo @NCURSES_LIBS@
+-@HAVE_UTIL_TRUE@script_LDADD = -lutil
+ @HAVE_NCURSES_TRUE@@HAVE_TINFO_FALSE@setterm_LDADD = @NCURSES_LIBS@
+ @HAVE_NCURSES_TRUE@@HAVE_TINFO_TRUE@setterm_LDADD = -ltinfo
+ @BUILD_KILL_TRUE@kill_SOURCES = kill.c procs.c kill.h
+diff -up util-linux-ng-2.17.2/misc-utils/script.c.kzak util-linux-ng-2.17.2/misc-utils/script.c
+--- util-linux-ng-2.17.2/misc-utils/script.c.kzak	2010-02-04 12:53:56.000000000 +0100
++++ util-linux-ng-2.17.2/misc-utils/script.c	2010-05-03 14:15:28.000000000 +0200
+@@ -59,11 +59,14 @@
+ 
+ #include "nls.h"
+ 
+-
+ #ifdef HAVE_LIBUTIL
+ #include <pty.h>
+ #endif
+ 
++#ifdef HAVE_LIBUTEMPTER
++#include <utempter.h>
++#endif
++
+ void finish(int);
+ void done(void);
+ void fail(void);
+@@ -77,7 +80,7 @@ void doshell(void);
+ 
+ char	*shell;
+ FILE	*fscript;
+-int	master;
++int	master = -1;
+ int	slave;
+ int	child;
+ int	subchild;
+@@ -196,6 +199,9 @@ main(int argc, char **argv) {
+ 		printf(_("Script started, file is %s\n"), fname);
+ 	fixtty();
+ 
++#ifdef HAVE_LIBUTEMPTER
++	utempter_add_record(master, NULL);
++#endif
+ 	sigemptyset(&sa.sa_mask);
+ 	sa.sa_flags = 0;
+ 
+@@ -386,6 +392,8 @@ doshell() {
+ 	(void) dup2(slave, 2);
+ 	(void) close(slave);
+ 
++	master = -1;
++
+ 	shname = strrchr(shell, '/');
+ 	if (shname)
+ 		shname++;
+@@ -431,10 +439,16 @@ done() {
+ 		}
+ 		(void) fclose(fscript);
+ 		(void) close(master);
++
++		master = -1;
+ 	} else {
+ 		(void) tcsetattr(0, TCSADRAIN, &tt);
+ 		if (!qflg)
+ 			printf(_("Script done, file is %s\n"), fname);
++#ifdef HAVE_LIBUTEMPTER
++		if (master >= 0)
++			utempter_remove_record(master);
++#endif
+ 	}
+ 	exit(0);
+ }
+@@ -476,9 +490,11 @@ getmaster() {
+ 					return;
+ 				}
+ 				(void) close(master);
++				master = -1;
+ 			}
+ 		}
+ 	}
++	master = -1;
+ 	fprintf(stderr, _("Out of pty's\n"));
+ 	fail();
+ #endif /* not HAVE_LIBUTIL */
